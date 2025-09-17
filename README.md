@@ -11,8 +11,10 @@ This library packages the original JS Mermaid parser and ported it with `PythonM
 
 
 ## Installation
+Since this project relies on the original MermaidJS package, you need to have [Node.js](https://nodejs.org/) installed in your system.
 
-You can install the library using pip:
+
+Then, You can install the library using pip:
 
 ```bash
 pip install mermaid-parser-py
