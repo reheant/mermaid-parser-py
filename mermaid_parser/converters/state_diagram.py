@@ -43,21 +43,30 @@ class StateDiagramConverter:
         self,
         root_doc: list[dict],
         all_states: dict[str, State],
-    ) -> tuple[dict[str, State], list[Note]]:
+        parent_id: str = None,
+    ) -> tuple[dict[str, State], list[Note], list[Transition]]:
         """
-        Extract and convert states and notes from parsed state diagram data.
+        Extract and convert states, notes, and transitions from parsed state diagram data.
+
+        Three-pass approach to correctly handle state hierarchy:
+        1. First pass: Process state declarations (but not their nested content yet)
+        2. Second pass: Process transitions at this level (now all states at this level are known)
+        3. Third pass: Recursively process nested content of composite states
 
         Args:
             root_doc: List of parsed state diagram elements
             all_states: Dictionary to store all states by id
+            parent_id: ID of the parent state (for nested states)
 
         Returns:
-            Tuple of (states_dict, notes_list)
+            Tuple of (states_dict, notes_list, transitions_list)
         """
         states = {}  # Dict to store states by id
         notes = []  # List to store notes
+        transitions = []  # List to store transitions
+        composite_states = []  # Track composite states for third pass
 
-        # Process all state items
+        # PASS 1: Process state declarations and notes (but don't recurse into composite states yet)
         for item in root_doc:
             if item["stmt"] == "state":
                 state_id = item["id"]
@@ -67,7 +76,9 @@ class StateDiagramConverter:
                     note_info = item["note"]
                     # Find or create the target state
                     if state_id not in states:
-                        states[state_id] = self._create_state(item)
+                        state = self._create_state(item, parent_id)
+                        if state:
+                            states[state_id] = state
 
                     note = Note(
                         content=note_info["text"],
@@ -76,28 +87,75 @@ class StateDiagramConverter:
                     )
                     notes.append(note)
                 else:
-                    # Handle regular state items
-                    if state_id not in states:
-                        states[state_id] = self._create_state(item)
-                        all_states[state_id] = states[state_id]
+                    # Handle regular state items and composite states
+                    if state_id not in all_states:
+                        state = self._create_state(item, parent_id)
+                        if state:
+                            states[state_id] = state
+                            all_states[state_id] = state
+
+                            # If this is a composite state, save it for later processing
+                            if "doc" in item:
+                                composite_states.append((state_id, item["doc"]))
                     else:
-                        # Update existing state with description if provided
+                        # State already exists - just update description if provided
                         description = item.get("description", "")
-                        if description:
+                        if description and state_id in states:
                             states[state_id].content = description
 
-        return states, notes
+        # PASS 2: Process transitions at this level
+        level_transitions = self._convert_transitions(root_doc, states, all_states, parent_id)
+        transitions.extend(level_transitions)
 
-    def _create_state(self, state_info: dict) -> State:
+        # PASS 3: Now recursively process nested content of composite states
+        for comp_state_id, comp_doc in composite_states:
+            nested_states, nested_notes, nested_transitions = self._convert_states_and_notes(
+                comp_doc, all_states, parent_id=comp_state_id
+            )
+            # Add nested states and their content
+            states.update(nested_states)
+            notes.extend(nested_notes)
+            transitions.extend(nested_transitions)
+
+        return states, notes, transitions
+
+    def _create_state(self, state_info: dict, parent_id: str = None) -> State:
+        """
+        Create a State object from parsed state info.
+
+        Args:
+            state_info: Dictionary containing state information
+            parent_id: ID of the parent state (if this is a nested state)
+
+        Returns:
+            State, Start, End, Composite, or Concurrent object
+        """
         state_id = state_info["id"]
         if "_start" in state_id:
             return Start()
         elif "_end" in state_id:
             return End()
-        elif "doc" not in state_info:
-            # regular state
-            state = State(id_=state_id, content=state_info.get("description", ""))
+        else:
+            # Create state (regular or composite)
+            if "doc" in state_info:
+                # Composite state - we'll create a regular state for now
+                # The nested states will be processed separately
+                state = Composite(
+                    id_=state_id,
+                    content=state_info.get("description", ""),
+                    sub_states=[],  # Will be populated during recursive processing
+                    transitions=[]
+                )
+            else:
+                # Regular state
+                state = State(id_=state_id, content=state_info.get("description", ""))
+
             state.id_ = state_id
+
+            # Set parent_id if this state is nested
+            if parent_id is not None:
+                state.parent_id = parent_id
+
             return state
 
     def _convert_transitions(
@@ -105,6 +163,7 @@ class StateDiagramConverter:
         root_doc: list[dict],
         current_states: dict[str, State],
         all_states: dict[str, State],
+        parent_id: str = None,
     ) -> list[Transition]:
         """
         Convert relation items to Transition objects.
@@ -113,6 +172,7 @@ class StateDiagramConverter:
             root_doc: List of parsed state diagram elements
             current_states: Dictionary of current states on the current level
             all_states: Dictionary to store all states by id in the state diagram
+            parent_id: ID of the parent state (for transitions within a composite state)
 
         Returns:
             List of Transition objects
@@ -125,18 +185,46 @@ class StateDiagramConverter:
                 state1_info = item["state1"]
                 state2_info = item["state2"]
 
-                # Handle start and end states for state1
+                # Handle state1
                 from_id = state1_info["id"]
                 if from_id not in all_states:
-                    all_states[from_id] = self._create_state(state1_info)
-                    current_states[from_id] = all_states[from_id]
+                    # This state is being defined for the first time
+                    # Set parent_id if we're inside a composite state AND the state is not
+                    # a self-reference or reference to a sibling at a different level
+                    if parent_id and from_id == parent_id:
+                        # Self-reference: Don't set parent_id
+                        new_state = self._create_state(state1_info, parent_id=None)
+                    elif "_start" in from_id or "_end" in from_id:
+                        # Start/End states belong to the current scope
+                        new_state = self._create_state(state1_info, parent_id)
+                    elif parent_id:
+                        # New state being defined in this scope
+                        new_state = self._create_state(state1_info, parent_id)
+                    else:
+                        # Root level state
+                        new_state = self._create_state(state1_info, parent_id=None)
+                    all_states[from_id] = new_state
+                    current_states[from_id] = new_state
                 from_state = all_states[from_id]
 
-                # Handle start and end states for state2
+                # Handle state2
                 to_id = state2_info["id"]
                 if to_id not in all_states:
-                    all_states[to_id] = self._create_state(state2_info)
-                    current_states[to_id] = all_states[to_id]
+                    # This state is being defined for the first time
+                    if parent_id and to_id == parent_id:
+                        # Self-reference: Don't set parent_id
+                        new_state = self._create_state(state2_info, parent_id=None)
+                    elif "_start" in to_id or "_end" in to_id:
+                        # Start/End states belong to the current scope
+                        new_state = self._create_state(state2_info, parent_id)
+                    elif parent_id:
+                        # New state being defined in this scope
+                        new_state = self._create_state(state2_info, parent_id)
+                    else:
+                        # Root level state
+                        new_state = self._create_state(state2_info, parent_id=None)
+                    all_states[to_id] = new_state
+                    current_states[to_id] = new_state
                 to_state = all_states[to_id]
 
                 # Get transition label if present
@@ -149,7 +237,7 @@ class StateDiagramConverter:
 
     def _convert_state_diagram(
         self, root_doc: list[dict], all_states: dict[str, State]
-    ) -> StateDiagramWithNote:
+    ) -> tuple[list[State], list[Transition], list[Note]]:
         """
         Convert parsed state diagram data to StateDiagramWithNote object.
 
@@ -158,13 +246,10 @@ class StateDiagramConverter:
             all_states: Dictionary to store all states by id
 
         Returns:
-            StateDiagramWithNote object
+            Tuple of (state_list, transitions, notes)
         """
-        # Convert states and notes
-        states_dict, notes = self._convert_states_and_notes(root_doc, all_states)
-
-        # Convert transitions
-        transitions = self._convert_transitions(root_doc, states_dict, all_states)
+        # Convert states, notes, and transitions (recursively processes composite states)
+        states_dict, notes, transitions = self._convert_states_and_notes(root_doc, all_states)
 
         # Create the state diagram
         state_list = list(states_dict.values())
