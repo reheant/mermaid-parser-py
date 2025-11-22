@@ -73,6 +73,11 @@ class StateDiagramConverter:
 
         # PASS 1: Process state declarations and notes (but don't recurse into composite states yet)
         for item in root_doc:
+            # Skip items that are strings (simple state declarations like "state ProgramComplete")
+            # These will be handled when they appear in transitions
+            if isinstance(item, str):
+                continue
+
             if item["stmt"] == "state":
                 state_id = item["id"]
                 scoped_key = self._get_scoped_key(state_id, parent_path)
@@ -198,22 +203,49 @@ class StateDiagramConverter:
             return f"{parent_id}_{state_id}"
         return state_id
 
-    def _find_state_in_all_states(self, state_id: str, parent_path: str, all_states: dict[str, State]) -> tuple[State, str]:
+    def _find_nearest_common_ancestor(self, path1: str, path2: str) -> str:
+        """
+        Find the nearest common ancestor of two paths.
+
+        Args:
+            path1: First hierarchical path (e.g., "On_LoggedOut")
+            path2: Second hierarchical path (e.g., "On_LoggedIn_Print")
+
+        Returns:
+            The nearest common ancestor path (e.g., "On"), or None if no common ancestor
+        """
+        if not path1 or not path2:
+            return None
+
+        parts1 = path1.split('_')
+        parts2 = path2.split('_')
+
+        common = []
+        for p1, p2 in zip(parts1, parts2):
+            if p1 == p2:
+                common.append(p1)
+            else:
+                break
+
+        return '_'.join(common) if common else None
+
+    def _find_state_in_all_states(self, state_id: str, parent_path: str, all_states: dict[str, State],
+                                   allow_sibling_search: bool = True) -> tuple[State, str]:
         """
         Find a state in all_states, checking both scoped and unscoped keys.
         Priority:
         1. Exact scoped key (within current context) - for states defined in this scope
         2. Unscoped key (global/root) - for states defined at root level
         3. Parent scope - for states defined in parent composite state
-        4. Any scope - for cross-scope references (only when searching from root)
-
-        Note: Within a scope, we DO NOT search sibling scopes - each scope can have its own state with the same name.
-              But from root level, we search all scopes.
+        4. Sibling scopes (if allow_sibling_search=True) - for states referenced by multiple siblings
+        5. Any scope - for cross-scope references (only when searching from root)
 
         Args:
             state_id: The state's ID
             parent_path: The current parent path (hierarchical path for scoping)
             all_states: Dictionary of all states
+            allow_sibling_search: If True, search sibling scopes for cross-scope references.
+                                 If False, only search current scope, parent scopes, and root.
 
         Returns:
             Tuple of (state, key_used) or (None, None) if not found
@@ -238,6 +270,17 @@ class StateDiagramConverter:
                 parent_scoped_key = f"{parent_prefix}_{state_id}"
                 if parent_scoped_key in all_states:
                     return all_states[parent_scoped_key], parent_scoped_key
+
+        # Check related scopes - search for this state anywhere in the hierarchy
+        # Only do this if allow_sibling_search is True
+        # If False, sibling scopes can have their own states with the same name
+        if allow_sibling_search and parent_path:
+            for key, state in all_states.items():
+                # Check if this state has matching id_
+                if hasattr(state, 'id_') and state.id_ == state_id:
+                    # Found a state with the same id somewhere in the hierarchy
+                    # Return it so it can be promoted to the nearest common ancestor if needed
+                    return state, key
 
         # If we're at root level (parent_path is None), search all scopes for this state
         # This handles cases where a state is defined in a nested scope but referenced from root
@@ -277,6 +320,10 @@ class StateDiagramConverter:
 
         # Process relation items
         for item in root_doc:
+            # Skip items that are strings
+            if isinstance(item, str):
+                continue
+
             if item["stmt"] == "relation":
                 state1_info = item["state1"]
                 state2_info = item["state2"]
@@ -288,11 +335,19 @@ class StateDiagramConverter:
                 # If we're at root level and found a state in a nested scope that's the SOURCE of this transition
                 # then promote it to root level (it's directly accessible from root)
                 if from_state and parent_id is None and found_key and '_' in found_key:
-                    # This state is the source of a root-level transition
-                    # Promote it to root level
-                    from_state.parent_id = None
-                    # Also store it with unscoped key for future lookups
-                    all_states[from_id] = from_state
+                    # Check if a root-level version already exists
+                    if from_id not in all_states:
+                        # This state is the source of a root-level transition
+                        # Promote it to root level
+                        from_state.parent_id = None
+                        # Also store it with unscoped key for future lookups
+                        all_states[from_id] = from_state
+                        # Remove the scoped key to avoid duplication
+                        if found_key in all_states:
+                            del all_states[found_key]
+                    else:
+                        # Root version exists, use that instead
+                        from_state = all_states[from_id]
 
                 if from_state is None:
                     # This state is being defined for the first time
@@ -324,7 +379,37 @@ class StateDiagramConverter:
 
                 # Handle state2
                 to_id = state2_info["id"]
-                to_state, found_key = self._find_state_in_all_states(to_id, parent_path, all_states)
+                # If this transition starts from a start marker ([*] or _start),
+                # the destination should be created in the current scope, not found in siblings
+                is_initial_transition = from_id == '[*]' or '_start' in from_id or from_id == 'root_start'
+                to_state, found_key = self._find_state_in_all_states(to_id, parent_path, all_states,
+                                                                     allow_sibling_search=not is_initial_transition)
+
+                # If we found the state in a different scope, promote it to nearest common ancestor
+                if to_state and found_key and parent_path:
+                    # Get the current parent of the found state
+                    current_parent = getattr(to_state, 'parent_id', None)
+                    # Calculate paths for comparison
+                    current_state_path = found_key.rsplit('_', 1)[0] if '_' in found_key else None
+
+                    # If the state is in a different branch of the hierarchy
+                    if current_state_path and current_state_path != parent_path:
+                        # Find nearest common ancestor
+                        common_ancestor = self._find_nearest_common_ancestor(current_state_path, parent_path)
+
+                        if common_ancestor:
+                            # Promote the state to the common ancestor
+                            # Extract the parent_id from the common ancestor path
+                            new_parent_id = common_ancestor.split('_')[-1] if common_ancestor else None
+                            to_state.parent_id = new_parent_id
+
+                            # Update the key in all_states
+                            new_key = self._get_scoped_key(to_id, common_ancestor)
+                            if new_key != found_key:
+                                # Remove old key, add new key
+                                if found_key in all_states:
+                                    del all_states[found_key]
+                                all_states[new_key] = to_state
 
                 if to_state is None:
                     # This state is being defined for the first time
