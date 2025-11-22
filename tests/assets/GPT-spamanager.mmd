@@ -1,0 +1,36 @@
+stateDiagram-v2
+    [*] --> SpaManager
+
+    state SpaManager {
+        --
+        state Sauna {
+            [*] --> Off
+            Off --> Heating : on
+            Heating --> Off : off
+            Heating --> Heating : temperatureChange [temp < 85] / {startHeating()}
+            Heating --> Heating : temperatureChange [temp >= 90] / {stopHeating()}
+            Heating --> FanActive : humidityCheck [humidity > 40%] / {after(3) startFan()}
+            FanActive --> Heating : after(5) / {stopFan()}
+            Heating --> WaterDispersion : requestWater [humidity < 40% && !fanActive] / {dispenseWater()}
+            WaterDispersion --> Heating : after(15)
+        }
+        --
+        state Jacuzzi {
+            [*] --> Off
+            Off --> Level1 : on
+            Level1 --> Off : off
+            Level1 --> Level2 : increasePressure
+            Level2 --> Level1 : decreasePressure
+            Level2 --> Level3 : increasePressure
+            Level3 --> Level2 : decreasePressure
+            Level1 --> Paused : pause
+            Level2 --> Paused : pause
+            Level3 --> Paused : pause
+            Paused --> Level1 : after(2) [history]
+            Paused --> Level2 : after(2) [history]
+            Paused --> Level3 : after(2) [history]
+            Level1 --> Level1 : selectPattern(n) [n >= 1 && n <= 25]
+            Level2 --> Level2 : selectPattern(n) [n >= 1 && n <= 25]
+            Level3 --> Level3 : selectPattern(n) [n >= 1 && n <= 25]
+        }
+    }

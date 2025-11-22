@@ -1,0 +1,57 @@
+stateDiagram-v2
+    [*] --> SpaSystem
+    
+    state SpaSystem {
+        --
+        state Sauna {
+            [*] --> SaunaOff
+            SaunaOff --> SaunaOn : turnOn
+            SaunaOn --> SaunaOff : turnOff
+            
+            state SaunaOn {
+                --
+                state HeatingControl {
+                    [*] --> Heating
+                    Heating --> NotHeating : [temp >= 90]
+                    NotHeating --> Heating : [temp < 85]
+                }
+                --
+                state HumidityControl {
+                    [*] --> Normal
+                    Normal --> HighHumidity : [humidity > 40] / startTimer
+                    HighHumidity --> FanActive : after(3min)
+                    FanActive --> Normal : after(5min)
+                    
+                    Normal --> Normal : dispenseWater [humidity < 40 && !fanActive && timeSinceLastDispense >= 15min]
+                }
+            }
+        }
+        --
+        state Jacuzzi {
+            [*] --> JacuzziOff
+            JacuzziOff --> JacuzziOn : turnOn
+            JacuzziOn --> JacuzziOff : turnOff
+            
+            state JacuzziOn {
+                --
+                state PressureControl {
+                    [*] --> Level1
+                    Level1 --> Level2 : increasePressure
+                    Level2 --> Level3 : increasePressure
+                    Level3 --> Level2 : decreasePressure
+                    Level2 --> Level1 : decreasePressure
+                }
+                --
+                state OperationControl {
+                    [*] --> Running
+                    Running --> Paused : pause
+                    Paused --> Running : after(2min)
+                    Running --> Running : selectPattern(n) [1 <= n <= 25]
+                }
+            }
+            
+            note right of OperationControl
+                pause/resume transitions maintain history state
+            end note
+        }
+    }

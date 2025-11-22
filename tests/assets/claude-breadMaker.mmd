@@ -1,0 +1,60 @@
+stateDiagram-v2
+    [*] --> Off
+    Off --> On : powerOn
+    On --> Off : powerOff
+
+    state On {
+        [*] --> Configuration
+
+        state Configuration {
+            --
+            state CourseSelection {
+                [*] --> Course1
+                Course1 --> Course2 : menu
+                Course2 --> Course3 : menu
+                Course3 --> Course1 : menu
+            }
+            --
+            state CrustSelection {
+                [*] --> Medium
+                Medium --> Dark : crust
+                Dark --> Light : crust
+                Light --> Medium : crust
+            }
+            --
+            state TimerSetting {
+                [*] --> NoDelay
+                NoDelay --> DelaySet : plus / timer+=10
+                DelaySet --> DelaySet : plus [timer<1080] / timer+=10
+                DelaySet --> DelaySet : minus [timer>0] / timer-=10
+                DelaySet --> NoDelay : minus [timer==0]
+            }
+        }
+
+        state BakingProcess {
+            [*] --> Countdown : [timer>0]
+            [*] --> Kneading : [timer==0]
+            
+            Countdown --> Kneading : timerExpired
+            
+            Kneading --> Rising : after(kneadingTime) / stopKneading()
+            note right of Kneading
+                entry / startKneading()
+            end note
+
+            Rising --> Baking : after(risingTime)
+
+            Baking --> Warming : after(bakingTime)
+            note right of Baking
+                entry / heat()
+            end note
+
+            Warming --> Configuration : after(60)
+            note right of Warming
+                entry / warm()
+            end note
+        }
+
+        Configuration --> BakingProcess : start
+        BakingProcess --> Configuration : stop
+    }
