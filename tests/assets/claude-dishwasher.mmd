@@ -1,0 +1,41 @@
+stateDiagram-v2
+    [*] --> ProgramSelection
+    
+    state ProgramSelection {
+        [*] --> Idle
+        Idle --> Idle : selectProgram
+        Idle --> Idle : adjustDryingTime [!running]
+    }
+
+    ProgramSelection --> Running : start
+
+    state Running {
+        [*] --> FillWater
+        
+        state WashCycle {
+            FillWater --> Washing : waterFilled
+            Washing --> Draining : after(10)
+            Draining --> FillWater : [cyclesRemaining]
+        }
+
+        WashCycle --> Drying : [!cyclesRemaining]
+
+        note right of Running
+            entry / lockDoor
+        end note
+    }
+
+    state Drying {
+        [*] --> DryingActive
+        DryingActive --> DryingSuspended : doorOpen
+        DryingSuspended --> DryingActive : doorClose [within5min]
+        DryingSuspended --> ProgramComplete : [after5min]
+        DryingActive --> ProgramComplete : dryingComplete
+    }
+
+    state ProgramComplete
+    ProgramComplete --> ProgramSelection : reset
+
+    note right of Drying
+        entry / unlockDoor
+    end note

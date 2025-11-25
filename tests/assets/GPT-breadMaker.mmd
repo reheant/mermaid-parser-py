@@ -1,0 +1,33 @@
+stateDiagram-v2
+    [*] --> Off
+    Off --> On : turnOn
+    On --> Off : turnOff
+
+    state On {
+        [*] --> CourseSelection
+
+        CourseSelection --> CrustSelection : menu
+        CrustSelection --> TimerSetting : crust
+        TimerSetting --> Kneading : start [timer == 0]
+        TimerSetting --> Countdown : start [timer > 0]
+
+        state Countdown {
+            [*] --> Waiting
+            Waiting --> Kneading : after(timer)
+        }
+
+        state BakingProcess {
+            [*] --> Kneading
+
+            Kneading --> Rising : afterKneading / stopKneading()
+            Rising --> Baking : afterRising
+            Baking --> Warming : afterBaking / heat()
+            Warming --> CourseSelection : afterWarming / warm()
+        }
+
+        Countdown --> BakingProcess
+        Kneading --> CourseSelection : stop
+        Rising --> CourseSelection : stop
+        Baking --> CourseSelection : stop
+        Warming --> CourseSelection : stop
+    }

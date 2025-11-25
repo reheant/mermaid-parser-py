@@ -1,0 +1,36 @@
+stateDiagram-v2
+    [*] --> Idle
+
+    state Idle {
+        [*] --> ProgramSelection
+        ProgramSelection --> Idle : adjustDryingTime
+        ProgramSelection --> Active : start
+    }
+
+    state Active {
+        [*] --> WaterIntake
+
+        WaterIntake --> Washing : afterWaterIntake
+        Washing --> Draining : after10min
+        Draining --> WaterIntake : repeatCycle
+        Draining --> Drying : lastCycle
+
+        Drying --> Suspended : openDoor
+        Drying --> Idle : endProgram
+
+        state Suspended {
+            [*] --> DoorOpen
+            DoorOpen --> Drying : closeDoor [within5min]
+            DoorOpen --> Idle : [after5min]
+        }
+    }
+
+    note right of Active
+        entry / lockDoor
+        exit / unlockDoor
+    end note
+
+    note right of Drying
+        entry / startDrying
+        exit / stopDrying
+    end note

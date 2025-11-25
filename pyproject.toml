@@ -1,6 +1,6 @@
 [project]
 name = "mermaid-parser-py"
-version = "0.0.3"
+version = "0.0.4"
 description = "Parse Mermaid into manipulable Python objects"
 authors = [
     {name = "Boqi Chen",email = "boqi.chen@mail.mcgill.ca"}
