@@ -2,6 +2,7 @@
 Test for the printer state machine example.
 This test validates that the parser correctly handles complex hierarchical state machines.
 """
+
 from mermaid_parser.converters.state_diagram import StateDiagramConverter
 
 
@@ -66,7 +67,7 @@ def test_printer_state_machine():
     # Build a map of states by ID for easy lookup
     states_by_id = {}
     for state in result.states:
-        state_id = getattr(state, 'id_', None)
+        state_id = getattr(state, "id_", None)
         if state_id:
             states_by_id[state_id] = state
 
@@ -74,76 +75,97 @@ def test_printer_state_machine():
     # Note: Error is referenced by LoggedOut, Print, and Scan
     # It should be placed at the nearest common ancestor: On
     expected_hierarchy = {
-        'On': ['LoggedOut', 'LoggedIn', 'Error'],
-        'LoggedOut': ['AwaitingLogin'],
-        'LoggedIn': ['Idle', 'Print', 'Scan', 'Suspended'],
-        'Print': ['CheckQueue', 'Printing'],
-        'Scan': ['CheckFeeder', 'Scanning'],
-        'Suspended': ['AwaitingResolution', 'ResupplyPaper', 'ClearJam']
+        "On": ["LoggedOut", "LoggedIn", "Error"],
+        "LoggedOut": ["AwaitingLogin"],
+        "LoggedIn": ["Idle", "Print", "Scan", "Suspended"],
+        "Print": ["CheckQueue", "Printing"],
+        "Scan": ["CheckFeeder", "Scanning"],
+        "Suspended": ["AwaitingResolution", "ResupplyPaper", "ClearJam"],
     }
 
     # Test 1: Check that all expected states exist
-    expected_states = ['Off', 'On', 'LoggedOut', 'AwaitingLogin', 'LoggedIn', 'Idle',
-                      'Print', 'CheckQueue', 'Printing', 'Scan', 'CheckFeeder',
-                      'Scanning', 'Suspended', 'AwaitingResolution', 'ResupplyPaper',
-                      'ClearJam', 'Error']
+    expected_states = [
+        "Off",
+        "On",
+        "LoggedOut",
+        "AwaitingLogin",
+        "LoggedIn",
+        "Idle",
+        "Print",
+        "CheckQueue",
+        "Printing",
+        "Scan",
+        "CheckFeeder",
+        "Scanning",
+        "Suspended",
+        "AwaitingResolution",
+        "ResupplyPaper",
+        "ClearJam",
+        "Error",
+    ]
 
     for state_name in expected_states:
         assert state_name in states_by_id, f"State {state_name} not found"
 
     # Test 2: Check parent-child relationships
     test_cases = [
-        ('Off', None),  # Root level
-        ('On', None),   # Root level
-        ('LoggedOut', 'On'),
-        ('AwaitingLogin', 'LoggedOut'),
-        ('LoggedIn', 'On'),
-        ('Idle', 'LoggedIn'),
-        ('Print', 'LoggedIn'),
-        ('CheckQueue', 'Print'),
-        ('Printing', 'Print'),
-        ('Scan', 'LoggedIn'),
-        ('CheckFeeder', 'Scan'),
-        ('Scanning', 'Scan'),
-        ('Suspended', 'LoggedIn'),
-        ('AwaitingResolution', 'Suspended'),
-        ('ResupplyPaper', 'Suspended'),
-        ('ClearJam', 'Suspended'),
-        ('Error', 'On'),  # Placed at nearest common ancestor of LoggedOut, Print, and Scan
+        ("Off", None),  # Root level
+        ("On", None),  # Root level
+        ("LoggedOut", "On"),
+        ("AwaitingLogin", "LoggedOut"),
+        ("LoggedIn", "On"),
+        ("Idle", "LoggedIn"),
+        ("Print", "LoggedIn"),
+        ("CheckQueue", "Print"),
+        ("Printing", "Print"),
+        ("Scan", "LoggedIn"),
+        ("CheckFeeder", "Scan"),
+        ("Scanning", "Scan"),
+        ("Suspended", "LoggedIn"),
+        ("AwaitingResolution", "Suspended"),
+        ("ResupplyPaper", "Suspended"),
+        ("ClearJam", "Suspended"),
+        (
+            "Error",
+            "On",
+        ),  # Placed at nearest common ancestor of LoggedOut, Print, and Scan
     ]
 
     for state_name, expected_parent in test_cases:
         state = states_by_id[state_name]
-        actual_parent = getattr(state, 'parent_id', None)
-        assert actual_parent == expected_parent, \
-            f"State {state_name}: expected parent_id={expected_parent}, got {actual_parent}"
+        actual_parent = getattr(state, "parent_id", None)
+        assert (
+            actual_parent == expected_parent
+        ), f"State {state_name}: expected parent_id={expected_parent}, got {actual_parent}"
 
     # Test 3: Verify hierarchical structure
     for parent_name, expected_children in expected_hierarchy.items():
         actual_children = [
-            s_id for s_id, state in states_by_id.items()
-            if getattr(state, 'parent_id', None) == parent_name
+            s_id
+            for s_id, state in states_by_id.items()
+            if getattr(state, "parent_id", None) == parent_name
         ]
-        assert set(actual_children) == set(expected_children), \
-            f"Parent {parent_name}: expected children {expected_children}, got {actual_children}"
+        assert set(actual_children) == set(
+            expected_children
+        ), f"Parent {parent_name}: expected children {expected_children}, got {actual_children}"
 
     # Test 4: Check that there are no duplicate states (excluding start/end markers)
-    state_ids = [getattr(s, 'id_', None) for s in result.states if hasattr(s, 'id_')]
+    state_ids = [getattr(s, "id_", None) for s in result.states if hasattr(s, "id_")]
     # Remove start/end markers from count (they're scoped per composite state and not meaningful for evaluation)
     # Start markers: '_start' suffix or '[*]'
     # End markers: '_end' suffix or '[*]'
-    non_marker_ids = [sid for sid in state_ids
-                      if sid and not sid.endswith('_start') and not sid.endswith('_end') and sid != '[*]']
+    non_marker_ids = [
+        sid
+        for sid in state_ids
+        if sid
+        and not sid.endswith("_start")
+        and not sid.endswith("_end")
+        and sid != "[*]"
+    ]
     unique_ids = set(non_marker_ids)
-    assert len(non_marker_ids) == len(unique_ids), \
-        f"Found duplicate states: {[sid for sid in non_marker_ids if non_marker_ids.count(sid) > 1]}"
+    assert len(non_marker_ids) == len(
+        unique_ids
+    ), f"Found duplicate states: {[sid for sid in non_marker_ids if non_marker_ids.count(sid) > 1]}"
 
     # Test 5: Verify transition count
     assert len(result.transitions) > 0, "No transitions found"
-
-    print("✅ All printer state machine tests passed!")
-    return True
-
-
-if __name__ == "__main__":
-    test_printer_state_machine()

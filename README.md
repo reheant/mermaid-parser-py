@@ -61,3 +61,10 @@ The MermaidJS diagram does not directly work with serverside Node applications. 
 
 ## Contribution
 Any suggestions, issues, or pull requests are more than welcome 🤗!
+
+### Run Tests
+You can run the tests using `pytest`:
+
+```bash
+pytest tests
+```

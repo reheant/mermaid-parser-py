@@ -76,7 +76,7 @@ class TestFlowChartConverter:
         link = f"{head_left}{link_type}{lead_right}"
 
         result = converter.convert(f"flowchart TD\nA {link} B")
-        
+
         link = result.links[0]
         assert link.head_left == head_left
         assert link.head_right == lead_right
