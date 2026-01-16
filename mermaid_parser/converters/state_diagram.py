@@ -99,7 +99,7 @@ class StateDiagramConverter:
                     note_info = item["note"]
                     # Find or create the target state
                     if state_id not in states:
-                        state = self._create_state(item, parent_id)
+                        state = self._create_state(item, parent_id, scoped_id=scoped_key)
                         if state:
                             states[state_id] = state
 
@@ -112,7 +112,7 @@ class StateDiagramConverter:
                 else:
                     # Handle regular state items and composite states
                     if scoped_key not in all_states:
-                        state = self._create_state(item, parent_id)
+                        state = self._create_state(item, parent_id, scoped_id=scoped_key)
                         if state:
                             states[state_id] = state
                             all_states[scoped_key] = state
@@ -188,13 +188,14 @@ class StateDiagramConverter:
 
         return states, notes, transitions
 
-    def _create_state(self, state_info: dict, parent_id: str = None) -> State:
+    def _create_state(self, state_info: dict, parent_id: str = None, scoped_id: str = None) -> State:
         """
         Create a State object from parsed state info.
 
         Args:
             state_info: Dictionary containing state information
             parent_id: ID of the parent state (if this is a nested state)
+            scoped_id: Full scoped identifier for the state (e.g., 'SpaManager_Sauna_Off')
 
         Returns:
             State, Start, End, Composite, or Concurrent object
@@ -224,6 +225,10 @@ class StateDiagramConverter:
             # Set parent_id if this state is nested
             if parent_id is not None:
                 state.parent_id = parent_id
+
+            # Set scoped_id for unique identification across parallel regions
+            # This allows disambiguation of states with the same name in different scopes
+            state.scoped_id = scoped_id if scoped_id else state_id
 
             return state
 
@@ -311,16 +316,28 @@ class StateDiagramConverter:
                 if parent_scoped_key in all_states:
                     return all_states[parent_scoped_key], parent_scoped_key
 
-        # Check related scopes - search for this state anywhere in the hierarchy
+        # Check related scopes - search for this state in ANCESTOR scopes only
         # Only do this if allow_sibling_search is True
-        # If False, sibling scopes can have their own states with the same name
+        # IMPORTANT: Don't return states from sibling composite states (e.g., Print's Suspended
+        # when looking from Scan). Each composite state should have its own local states.
         if allow_sibling_search and parent_path:
             for key, state in all_states.items():
                 # Check if this state has matching id_
                 if hasattr(state, 'id_') and state.id_ == state_id:
-                    # Found a state with the same id somewhere in the hierarchy
-                    # Return it so it can be promoted to the nearest common ancestor if needed
-                    return state, key
+                    # Check if this state is in an ancestor scope of the current path
+                    # (not a sibling composite state at the same level)
+                    # For example, if parent_path is "On_LoggedIn_Scan" and key is "On_LoggedIn_Print_Suspended",
+                    # this is NOT an ancestor (it's a sibling), so skip it.
+                    # But if key is "On_LoggedIn_Error", it IS in an ancestor scope.
+                    state_scope = key.rsplit('_', 1)[0] if '_' in key else ''
+                    # State is in ancestor scope if the current path starts with the state's scope
+                    # or if the state is at the same level as an ancestor
+                    if state_scope and parent_path.startswith(state_scope + '_'):
+                        # This state's scope is a prefix of our current path - it's an ancestor
+                        return state, key
+                    elif not state_scope:
+                        # Root level state
+                        return state, key
 
         # If we're at root level (parent_path is None), search all scopes for this state
         # This handles cases where a state is defined in a nested scope but referenced from root
@@ -393,24 +410,24 @@ class StateDiagramConverter:
                     # This state is being defined for the first time
                     if parent_id and from_id == parent_id:
                         # Self-reference: Don't set parent_id, use unscoped key
-                        new_state = self._create_state(state1_info, parent_id=None)
+                        new_state = self._create_state(state1_info, parent_id=None, scoped_id=from_id)
                         all_states[from_id] = new_state
                         from_state = new_state
                     elif "_start" in from_id or "_end" in from_id:
                         # Start/End states: use scoped key
                         scoped_key = self._get_scoped_key(from_id, parent_path)
-                        new_state = self._create_state(state1_info, parent_id)
+                        new_state = self._create_state(state1_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         from_state = new_state
                     elif parent_id:
                         # New state in this scope: use scoped key
                         scoped_key = self._get_scoped_key(from_id, parent_path)
-                        new_state = self._create_state(state1_info, parent_id)
+                        new_state = self._create_state(state1_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         from_state = new_state
                     else:
                         # Root level state: use unscoped key
-                        new_state = self._create_state(state1_info, parent_id=None)
+                        new_state = self._create_state(state1_info, parent_id=None, scoped_id=from_id)
                         all_states[from_id] = new_state
                         from_state = new_state
 
@@ -455,24 +472,24 @@ class StateDiagramConverter:
                     # This state is being defined for the first time
                     if parent_id and to_id == parent_id:
                         # Self-reference: Don't set parent_id, use unscoped key
-                        new_state = self._create_state(state2_info, parent_id=None)
+                        new_state = self._create_state(state2_info, parent_id=None, scoped_id=to_id)
                         all_states[to_id] = new_state
                         to_state = new_state
                     elif "_start" in to_id or "_end" in to_id:
                         # Start/End states: use scoped key
                         scoped_key = self._get_scoped_key(to_id, parent_path)
-                        new_state = self._create_state(state2_info, parent_id)
+                        new_state = self._create_state(state2_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         to_state = new_state
                     elif parent_id:
                         # New state in this scope: use scoped key
                         scoped_key = self._get_scoped_key(to_id, parent_path)
-                        new_state = self._create_state(state2_info, parent_id)
+                        new_state = self._create_state(state2_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         to_state = new_state
                     else:
                         # Root level state: use unscoped key
-                        new_state = self._create_state(state2_info, parent_id=None)
+                        new_state = self._create_state(state2_info, parent_id=None, scoped_id=to_id)
                         all_states[to_id] = new_state
                         to_state = new_state
 
