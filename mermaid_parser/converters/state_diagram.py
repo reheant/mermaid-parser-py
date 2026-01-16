@@ -7,11 +7,15 @@ import networkx as nx
 
 """
 Currently, this class gives basic support for converting flat state diagrams with notes.
-Under construction
+Supports:
+- Basic states and transitions
+- Composite (hierarchical) states
+- Parallel regions (via -- separator)
+- Notes attached to states
 
-# TODO: Add support for Composite and Concurrent states
 # TODO: Add support for Fork and Join transitions
 # TODO: Add support for Choice transitions
+# TODO: Add support for History states
 # TODO: Add support for converting to networkx graph
 """
 
@@ -70,6 +74,7 @@ class StateDiagramConverter:
         notes = []  # List to store notes
         transitions = []  # List to store transitions
         composite_states = []  # Track composite states for third pass
+        divider_regions = []  # Track divider regions for parallel state handling
 
         # PASS 1: Process state declarations and notes (but don't recurse into composite states yet)
         for item in root_doc:
@@ -80,6 +85,13 @@ class StateDiagramConverter:
 
             if item["stmt"] == "state":
                 state_id = item["id"]
+
+                # Check if this is a divider (parallel region marker)
+                if item.get("type") == "divider":
+                    # Track divider regions for later processing
+                    divider_regions.append(item)
+                    continue
+
                 scoped_key = self._get_scoped_key(state_id, parent_path)
 
                 # Handle note items
@@ -145,6 +157,34 @@ class StateDiagramConverter:
                 states.update(nested_states)
                 notes.extend(nested_notes)
                 transitions.extend(nested_transitions)
+
+        # PASS 4: Process divider regions (parallel states)
+        if divider_regions:
+            parallel_info = self._process_parallel_regions(
+                divider_regions, all_states, parent_id, parent_path
+            )
+            # Add the parallel region states and transitions
+            for region_data in parallel_info:
+                states.update(region_data['states'])
+                transitions.extend(region_data['transitions'])
+                notes.extend(region_data.get('notes', []))
+
+            # Mark the parent state as having parallel regions
+            # The parent state is in all_states, not the local states dict
+            if parent_id:
+                # Find the parent state in all_states (try both scoped and unscoped keys)
+                parent_state = all_states.get(parent_id)
+                if parent_state is None and parent_path:
+                    # Try with full path
+                    for key, state in all_states.items():
+                        if hasattr(state, 'id_') and state.id_ == parent_id:
+                            parent_state = state
+                            break
+
+                if parent_state:
+                    # Add parallel_regions attribute dynamically
+                    parent_state.parallel_regions = parallel_info
+                    logger.debug(f"Set parallel_regions on {parent_id}: {len(parallel_info)} regions")
 
         return states, notes, transitions
 
@@ -374,8 +414,8 @@ class StateDiagramConverter:
                         all_states[from_id] = new_state
                         from_state = new_state
 
-                    if from_id in current_states:
-                        current_states[from_id] = from_state
+                    # Always add the new state to current_states
+                    current_states[from_id] = from_state
 
                 # Handle state2
                 to_id = state2_info["id"]
@@ -436,8 +476,8 @@ class StateDiagramConverter:
                         all_states[to_id] = new_state
                         to_state = new_state
 
-                    if to_id in current_states:
-                        current_states[to_id] = to_state
+                    # Always add the new state to current_states
+                    current_states[to_id] = to_state
 
                 # Get transition label if present
                 label = item.get("description", "")
@@ -446,6 +486,74 @@ class StateDiagramConverter:
                 transitions.append(transition)
 
         return transitions
+
+    def _process_parallel_regions(
+        self,
+        divider_regions: list[dict],
+        all_states: dict[str, State],
+        parent_id: str = None,
+        parent_path: str = None,
+    ) -> list[dict]:
+        """
+        Process divider regions to extract parallel state information.
+
+        Each divider region contains states and transitions that should run
+        concurrently with other regions under the same parent.
+
+        Args:
+            divider_regions: List of divider items from the parser
+            all_states: Dictionary to store all states by id
+            parent_id: ID of the parent composite state
+            parent_path: Full hierarchical path to parent
+
+        Returns:
+            List of region dictionaries, each containing:
+            - 'name': Region identifier (e.g., 'region_0', 'region_1')
+            - 'states': Dict of states in this region
+            - 'transitions': List of transitions in this region
+            - 'initial': Initial state ID for this region (if any)
+        """
+        parallel_info = []
+
+        for idx, divider in enumerate(divider_regions):
+            divider_id = divider.get("id", f"region_{idx}")
+            divider_doc = divider.get("doc", [])
+
+            # Create a unique region name
+            region_name = f"region_{idx}"
+
+            # Process the divider's content using the existing conversion logic
+            # Use a modified parent path that includes the region identifier
+            region_parent_path = f"{parent_path}_{region_name}" if parent_path else region_name
+
+            region_states, region_notes, region_transitions = self._convert_states_and_notes(
+                divider_doc,
+                all_states,
+                parent_id=parent_id,  # States belong to the same parent
+                parent_path=region_parent_path
+            )
+
+            # Find the initial state for this region
+            initial_state = None
+            for state_id, state in region_states.items():
+                if isinstance(state, Start):
+                    # Find what the start state transitions to
+                    for trans in region_transitions:
+                        if isinstance(trans.from_state, Start):
+                            initial_state = trans.to_state.id_ if hasattr(trans.to_state, 'id_') else str(trans.to_state)
+                            break
+                    break
+
+            parallel_info.append({
+                'name': region_name,
+                'divider_id': divider_id,  # Original divider ID for reference
+                'states': region_states,
+                'transitions': region_transitions,
+                'notes': region_notes,
+                'initial': initial_state
+            })
+
+        return parallel_info
 
     def _convert_state_diagram(
         self, root_doc: list[dict], all_states: dict[str, State]
