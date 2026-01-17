@@ -1,9 +1,10 @@
 from loguru import logger
-from mermaid_parser.structs.state_diagram import StateDiagramWithNote, Note
+from mermaid_parser.structs.state_diagram import StateDiagramWithNote, Note, HistoryState
 from mermaid.statediagram.state import Composite, Concurrent, End, Start, State
 from mermaid.statediagram.transition import Choice, Fork, Join, Transition
 from mermaid_parser import MermaidParser
 import networkx as nx
+import re
 
 """
 Currently, this class gives basic support for converting flat state diagrams with notes.
@@ -12,10 +13,10 @@ Supports:
 - Composite (hierarchical) states
 - Parallel regions (via -- separator)
 - Notes attached to states
+- History states (shallow) via note indicators
 
 # TODO: Add support for Fork and Join transitions
 # TODO: Add support for Choice transitions
-# TODO: Add support for History states
 # TODO: Add support for converting to networkx graph
 """
 
@@ -23,8 +24,14 @@ Supports:
 class StateDiagramConverter:
     def __init__(self):
         self.parser = MermaidParser()
+        self.history_states = {}  # Maps composite state ID -> HistoryState object
+        self.history_transitions = {}  # Maps (from_state, trigger) -> target_composite_state for history
 
     def convert(self, mermaid_text: str) -> StateDiagramWithNote:
+        # Reset history state tracking for each conversion
+        self.history_states = {}
+        self.history_transitions = {}
+
         # TODO: the current parser does not handle rendering styles
         parsed_data = self.parser.parse(mermaid_text)
         graph_type = parsed_data.get("graph_type")
@@ -35,13 +42,177 @@ class StateDiagramConverter:
         states, transitions, notes = self._convert_state_diagram(
             parsed_data["graph_data"]["rootDoc"], all_states
         )
-        return StateDiagramWithNote(
+
+        # Process notes to detect history state indicators and create history states
+        self._process_history_notes(notes, all_states, transitions)
+
+        # Add history states to the states list
+        for history_state in self.history_states.values():
+            states.append(history_state)
+
+        result = StateDiagramWithNote(
             title="State Diagram",
             states=states,
             transitions=transitions,
             notes=notes,
             version="v2",
         )
+
+        # Attach history state info to the result for consumers
+        result.history_states = self.history_states
+        result.history_transitions = self.history_transitions
+
+        return result
+
+    def _process_history_notes(self, notes: list, all_states: dict, transitions: list) -> None:
+        """
+        Process notes to detect history state indicators.
+        Patterns detected:
+        - "transitions to ... history state"
+        - "returns to ... history state"
+        - "resume" combined with history indication
+        - Generic "history state" (infers target from context)
+
+        Creates HistoryState objects for composite states that have history transitions.
+        """
+        # Patterns to detect history state notes with explicit target
+        history_patterns = [
+            r'(?:transitions?\s+to|returns?\s+to|resumes?\s+to?)\s+(\w+)\s+history\s+state',
+            r'(\w+)\s+history\s+state',
+            r'history\s+state\s+(?:of\s+)?(\w+)',
+        ]
+
+        # Build a map of state -> parent composite for inferring history targets
+        state_to_parent = {}
+        for state_key, state in all_states.items():
+            parent_id = getattr(state, 'parent_id', None)
+            if parent_id:
+                state_id = getattr(state, 'id_', state_key)
+                state_to_parent[state_id] = parent_id
+
+        for note in notes:
+            note_text = note.content.lower()
+            logger.debug(f"Processing note: '{note.content}' on state: {getattr(note.target_state, 'id_', 'unknown')}")
+
+            # Check if this note indicates a history state
+            if 'history' not in note_text:
+                continue
+
+            logger.debug(f"Found history note: '{note.content}'")
+
+            # Try to extract the target composite state name from the note text
+            target_composite = None
+            for pattern in history_patterns:
+                match = re.search(pattern, note_text, re.IGNORECASE)
+                if match:
+                    target_composite = match.group(1)
+                    break
+
+            # Get the source state (note is attached to it)
+            source_state = note.target_state
+            source_id = getattr(source_state, 'id_', None) if source_state else None
+
+            # Build list of states to check for transitions (source + its children)
+            states_to_check = [source_id] if source_id else []
+            # Add children of the source state (note might be on a composite containing the actual source)
+            for state_key, state in all_states.items():
+                parent = getattr(state, 'parent_id', None)
+                if parent == source_id:
+                    child_id = getattr(state, 'id_', state_key)
+                    states_to_check.append(child_id)
+
+            # If no explicit target found, infer from context
+            if not target_composite and states_to_check:
+                # Find transitions FROM the source state or its children with "resume" in the label
+                for transition in transitions:
+                    from_state = getattr(transition, 'from_state', None)
+                    from_id = getattr(from_state, 'id_', None) if from_state else None
+
+                    if from_id in states_to_check:
+                        label = getattr(transition, 'label', '') or ''
+                        # Check if this is a resume-like transition
+                        if 'resume' in label.lower():
+                            to_state = getattr(transition, 'to_state', None)
+                            to_id = getattr(to_state, 'id_', None) if to_state else None
+
+                            if to_id:
+                                # The target composite could be:
+                                # 1. The destination itself if it's a composite state
+                                # 2. The parent of the destination state
+                                # Check if destination is a composite (has children)
+                                dest_is_composite = any(
+                                    getattr(s, 'parent_id', None) == to_id
+                                    for s in all_states.values()
+                                )
+                                if dest_is_composite:
+                                    target_composite = to_id
+                                    logger.debug(f"Inferred history target '{target_composite}' (composite destination) from transition {from_id} -> {to_id}")
+                                elif to_id in state_to_parent:
+                                    target_composite = state_to_parent[to_id]
+                                    logger.debug(f"Inferred history target '{target_composite}' from transition {from_id} -> {to_id}")
+                                break
+
+            if not target_composite:
+                logger.warning(f"Could not determine history state target from note on '{source_id}'. States checked: {states_to_check}")
+                continue
+
+            logger.debug(f"History target identified: '{target_composite}'")
+
+            # Normalize the target composite name (case-insensitive lookup)
+            actual_composite = None
+            for state_key, state in all_states.items():
+                if hasattr(state, 'id_') and state.id_.lower() == target_composite.lower():
+                    actual_composite = state.id_
+                    break
+
+            if not actual_composite:
+                logger.warning(f"Could not find composite state '{target_composite}' for history state")
+                continue
+
+            # Create a HistoryState for this composite state if not already created
+            if actual_composite not in self.history_states:
+                history_state = HistoryState(actual_composite)
+                history_state.parent_id = actual_composite  # Set parent relationship
+                self.history_states[actual_composite] = history_state
+                logger.debug(f"Created history state for composite: {actual_composite}")
+
+            # Find and update the transition that goes to history
+            # Check transitions from source state AND its children
+            if states_to_check:
+                for transition in transitions:
+                    from_state = getattr(transition, 'from_state', None)
+                    from_id = getattr(from_state, 'id_', None) if from_state else None
+
+                    if from_id not in states_to_check:
+                        continue
+
+                    to_state = getattr(transition, 'to_state', None)
+                    to_id = getattr(to_state, 'id_', None) if to_state else None
+                    label = getattr(transition, 'label', '') or ''
+
+                    # Check if this transition should go to history:
+                    # - destination IS the target composite, OR
+                    # - destination is inside the target composite, OR
+                    # - label contains "resume"
+                    is_history_trans = False
+                    if to_id:
+                        # Check if destination is or is inside the composite
+                        if to_id == actual_composite:
+                            is_history_trans = True
+                        elif state_to_parent.get(to_id) == actual_composite:
+                            is_history_trans = True
+                        # Also check for resume transitions
+                        if 'resume' in label.lower():
+                            is_history_trans = True
+
+                    if is_history_trans:
+                        # Mark this transition as going to history
+                        trigger = label or 'auto'
+                        self.history_transitions[(from_id, trigger)] = actual_composite
+                        # Update transition destination to history state
+                        transition.to_state = self.history_states[actual_composite]
+                        transition.is_history_transition = True
+                        logger.debug(f"Updated transition {from_id} --{label}--> {to_id} to target {actual_composite} history state")
 
     def _convert_states_and_notes(
         self,
