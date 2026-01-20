@@ -6,6 +6,28 @@ from mermaid import Direction
 from mermaid.configuration import Config
 
 
+class HistoryState(State):
+    """
+    Represents a shallow history pseudo-state within a composite state.
+    When a transition targets a history state, it resumes the last active
+    substate of the parent composite state.
+    """
+
+    def __init__(self, parent_state_id: str) -> None:
+        """
+        Args:
+            parent_state_id: The ID of the parent composite state this history belongs to
+        """
+        # Create an H pseudo-state with id like "ParentState_H"
+        history_id = f"{parent_state_id}_H"
+        super().__init__(id_=history_id, content="H")
+        self.parent_state_id = parent_state_id
+        self.is_history_state = True
+
+    def __str__(self):
+        return f"state {self.id_} <<history>>"
+
+
 class Note:
     def __init__(self, content: str, target_state: State, position: str) -> None:
         self.content: str = content

@@ -1,15 +1,20 @@
 from loguru import logger
-from mermaid_parser.structs.state_diagram import StateDiagramWithNote, Note
+from mermaid_parser.structs.state_diagram import StateDiagramWithNote, Note, HistoryState
 from mermaid.statediagram.state import Composite, Concurrent, End, Start, State
 from mermaid.statediagram.transition import Choice, Fork, Join, Transition
 from mermaid_parser import MermaidParser
 import networkx as nx
+import re
 
 """
 Currently, this class gives basic support for converting flat state diagrams with notes.
-Under construction
+Supports:
+- Basic states and transitions
+- Composite (hierarchical) states
+- Parallel regions (via -- separator)
+- Notes attached to states
+- History states (shallow) via note indicators
 
-# TODO: Add support for Composite and Concurrent states
 # TODO: Add support for Fork and Join transitions
 # TODO: Add support for Choice transitions
 # TODO: Add support for converting to networkx graph
@@ -19,8 +24,14 @@ Under construction
 class StateDiagramConverter:
     def __init__(self):
         self.parser = MermaidParser()
+        self.history_states = {}  # Maps composite state ID -> HistoryState object
+        self.history_transitions = {}  # Maps (from_state, trigger) -> target_composite_state for history
 
     def convert(self, mermaid_text: str) -> StateDiagramWithNote:
+        # Reset history state tracking for each conversion
+        self.history_states = {}
+        self.history_transitions = {}
+
         # TODO: the current parser does not handle rendering styles
         parsed_data = self.parser.parse(mermaid_text)
         graph_type = parsed_data.get("graph_type")
@@ -31,13 +42,177 @@ class StateDiagramConverter:
         states, transitions, notes = self._convert_state_diagram(
             parsed_data["graph_data"]["rootDoc"], all_states
         )
-        return StateDiagramWithNote(
+
+        # Process notes to detect history state indicators and create history states
+        self._process_history_notes(notes, all_states, transitions)
+
+        # Add history states to the states list
+        for history_state in self.history_states.values():
+            states.append(history_state)
+
+        result = StateDiagramWithNote(
             title="State Diagram",
             states=states,
             transitions=transitions,
             notes=notes,
             version="v2",
         )
+
+        # Attach history state info to the result for consumers
+        result.history_states = self.history_states
+        result.history_transitions = self.history_transitions
+
+        return result
+
+    def _process_history_notes(self, notes: list, all_states: dict, transitions: list) -> None:
+        """
+        Process notes to detect history state indicators.
+        Patterns detected:
+        - "transitions to ... history state"
+        - "returns to ... history state"
+        - "resume" combined with history indication
+        - Generic "history state" (infers target from context)
+
+        Creates HistoryState objects for composite states that have history transitions.
+        """
+        # Patterns to detect history state notes with explicit target
+        history_patterns = [
+            r'(?:transitions?\s+to|returns?\s+to|resumes?\s+to?)\s+(\w+)\s+history\s+state',
+            r'(\w+)\s+history\s+state',
+            r'history\s+state\s+(?:of\s+)?(\w+)',
+        ]
+
+        # Build a map of state -> parent composite for inferring history targets
+        state_to_parent = {}
+        for state_key, state in all_states.items():
+            parent_id = getattr(state, 'parent_id', None)
+            if parent_id:
+                state_id = getattr(state, 'id_', state_key)
+                state_to_parent[state_id] = parent_id
+
+        for note in notes:
+            note_text = note.content.lower()
+            logger.debug(f"Processing note: '{note.content}' on state: {getattr(note.target_state, 'id_', 'unknown')}")
+
+            # Check if this note indicates a history state
+            if 'history' not in note_text:
+                continue
+
+            logger.debug(f"Found history note: '{note.content}'")
+
+            # Try to extract the target composite state name from the note text
+            target_composite = None
+            for pattern in history_patterns:
+                match = re.search(pattern, note_text, re.IGNORECASE)
+                if match:
+                    target_composite = match.group(1)
+                    break
+
+            # Get the source state (note is attached to it)
+            source_state = note.target_state
+            source_id = getattr(source_state, 'id_', None) if source_state else None
+
+            # Build list of states to check for transitions (source + its children)
+            states_to_check = [source_id] if source_id else []
+            # Add children of the source state (note might be on a composite containing the actual source)
+            for state_key, state in all_states.items():
+                parent = getattr(state, 'parent_id', None)
+                if parent == source_id:
+                    child_id = getattr(state, 'id_', state_key)
+                    states_to_check.append(child_id)
+
+            # If no explicit target found, infer from context
+            if not target_composite and states_to_check:
+                # Find transitions FROM the source state or its children with "resume" in the label
+                for transition in transitions:
+                    from_state = getattr(transition, 'from_state', None)
+                    from_id = getattr(from_state, 'id_', None) if from_state else None
+
+                    if from_id in states_to_check:
+                        label = getattr(transition, 'label', '') or ''
+                        # Check if this is a resume-like transition
+                        if 'resume' in label.lower():
+                            to_state = getattr(transition, 'to_state', None)
+                            to_id = getattr(to_state, 'id_', None) if to_state else None
+
+                            if to_id:
+                                # The target composite could be:
+                                # 1. The destination itself if it's a composite state
+                                # 2. The parent of the destination state
+                                # Check if destination is a composite (has children)
+                                dest_is_composite = any(
+                                    getattr(s, 'parent_id', None) == to_id
+                                    for s in all_states.values()
+                                )
+                                if dest_is_composite:
+                                    target_composite = to_id
+                                    logger.debug(f"Inferred history target '{target_composite}' (composite destination) from transition {from_id} -> {to_id}")
+                                elif to_id in state_to_parent:
+                                    target_composite = state_to_parent[to_id]
+                                    logger.debug(f"Inferred history target '{target_composite}' from transition {from_id} -> {to_id}")
+                                break
+
+            if not target_composite:
+                logger.warning(f"Could not determine history state target from note on '{source_id}'. States checked: {states_to_check}")
+                continue
+
+            logger.debug(f"History target identified: '{target_composite}'")
+
+            # Normalize the target composite name (case-insensitive lookup)
+            actual_composite = None
+            for state_key, state in all_states.items():
+                if hasattr(state, 'id_') and state.id_.lower() == target_composite.lower():
+                    actual_composite = state.id_
+                    break
+
+            if not actual_composite:
+                logger.warning(f"Could not find composite state '{target_composite}' for history state")
+                continue
+
+            # Create a HistoryState for this composite state if not already created
+            if actual_composite not in self.history_states:
+                history_state = HistoryState(actual_composite)
+                history_state.parent_id = actual_composite  # Set parent relationship
+                self.history_states[actual_composite] = history_state
+                logger.debug(f"Created history state for composite: {actual_composite}")
+
+            # Find and update the transition that goes to history
+            # Check transitions from source state AND its children
+            if states_to_check:
+                for transition in transitions:
+                    from_state = getattr(transition, 'from_state', None)
+                    from_id = getattr(from_state, 'id_', None) if from_state else None
+
+                    if from_id not in states_to_check:
+                        continue
+
+                    to_state = getattr(transition, 'to_state', None)
+                    to_id = getattr(to_state, 'id_', None) if to_state else None
+                    label = getattr(transition, 'label', '') or ''
+
+                    # Check if this transition should go to history:
+                    # - destination IS the target composite, OR
+                    # - destination is inside the target composite, OR
+                    # - label contains "resume"
+                    is_history_trans = False
+                    if to_id:
+                        # Check if destination is or is inside the composite
+                        if to_id == actual_composite:
+                            is_history_trans = True
+                        elif state_to_parent.get(to_id) == actual_composite:
+                            is_history_trans = True
+                        # Also check for resume transitions
+                        if 'resume' in label.lower():
+                            is_history_trans = True
+
+                    if is_history_trans:
+                        # Mark this transition as going to history
+                        trigger = label or 'auto'
+                        self.history_transitions[(from_id, trigger)] = actual_composite
+                        # Update transition destination to history state
+                        transition.to_state = self.history_states[actual_composite]
+                        transition.is_history_transition = True
+                        logger.debug(f"Updated transition {from_id} --{label}--> {to_id} to target {actual_composite} history state")
 
     def _convert_states_and_notes(
         self,
@@ -70,6 +245,7 @@ class StateDiagramConverter:
         notes = []  # List to store notes
         transitions = []  # List to store transitions
         composite_states = []  # Track composite states for third pass
+        divider_regions = []  # Track divider regions for parallel state handling
 
         # PASS 1: Process state declarations and notes (but don't recurse into composite states yet)
         for item in root_doc:
@@ -80,6 +256,13 @@ class StateDiagramConverter:
 
             if item["stmt"] == "state":
                 state_id = item["id"]
+
+                # Check if this is a divider (parallel region marker)
+                if item.get("type") == "divider":
+                    # Track divider regions for later processing
+                    divider_regions.append(item)
+                    continue
+
                 scoped_key = self._get_scoped_key(state_id, parent_path)
 
                 # Handle note items
@@ -87,7 +270,7 @@ class StateDiagramConverter:
                     note_info = item["note"]
                     # Find or create the target state
                     if state_id not in states:
-                        state = self._create_state(item, parent_id)
+                        state = self._create_state(item, parent_id, scoped_id=scoped_key)
                         if state:
                             states[state_id] = state
 
@@ -100,7 +283,7 @@ class StateDiagramConverter:
                 else:
                     # Handle regular state items and composite states
                     if scoped_key not in all_states:
-                        state = self._create_state(item, parent_id)
+                        state = self._create_state(item, parent_id, scoped_id=scoped_key)
                         if state:
                             states[state_id] = state
                             all_states[scoped_key] = state
@@ -146,15 +329,44 @@ class StateDiagramConverter:
                 notes.extend(nested_notes)
                 transitions.extend(nested_transitions)
 
+        # PASS 4: Process divider regions (parallel states)
+        if divider_regions:
+            parallel_info = self._process_parallel_regions(
+                divider_regions, all_states, parent_id, parent_path
+            )
+            # Add the parallel region states and transitions
+            for region_data in parallel_info:
+                states.update(region_data['states'])
+                transitions.extend(region_data['transitions'])
+                notes.extend(region_data.get('notes', []))
+
+            # Mark the parent state as having parallel regions
+            # The parent state is in all_states, not the local states dict
+            if parent_id:
+                # Find the parent state in all_states (try both scoped and unscoped keys)
+                parent_state = all_states.get(parent_id)
+                if parent_state is None and parent_path:
+                    # Try with full path
+                    for key, state in all_states.items():
+                        if hasattr(state, 'id_') and state.id_ == parent_id:
+                            parent_state = state
+                            break
+
+                if parent_state:
+                    # Add parallel_regions attribute dynamically
+                    parent_state.parallel_regions = parallel_info
+                    logger.debug(f"Set parallel_regions on {parent_id}: {len(parallel_info)} regions")
+
         return states, notes, transitions
 
-    def _create_state(self, state_info: dict, parent_id: str = None) -> State:
+    def _create_state(self, state_info: dict, parent_id: str = None, scoped_id: str = None) -> State:
         """
         Create a State object from parsed state info.
 
         Args:
             state_info: Dictionary containing state information
             parent_id: ID of the parent state (if this is a nested state)
+            scoped_id: Full scoped identifier for the state (e.g., 'SpaManager_Sauna_Off')
 
         Returns:
             State, Start, End, Composite, or Concurrent object
@@ -184,6 +396,10 @@ class StateDiagramConverter:
             # Set parent_id if this state is nested
             if parent_id is not None:
                 state.parent_id = parent_id
+
+            # Set scoped_id for unique identification across parallel regions
+            # This allows disambiguation of states with the same name in different scopes
+            state.scoped_id = scoped_id if scoped_id else state_id
 
             return state
 
@@ -271,16 +487,28 @@ class StateDiagramConverter:
                 if parent_scoped_key in all_states:
                     return all_states[parent_scoped_key], parent_scoped_key
 
-        # Check related scopes - search for this state anywhere in the hierarchy
+        # Check related scopes - search for this state in ANCESTOR scopes only
         # Only do this if allow_sibling_search is True
-        # If False, sibling scopes can have their own states with the same name
+        # IMPORTANT: Don't return states from sibling composite states (e.g., Print's Suspended
+        # when looking from Scan). Each composite state should have its own local states.
         if allow_sibling_search and parent_path:
             for key, state in all_states.items():
                 # Check if this state has matching id_
                 if hasattr(state, 'id_') and state.id_ == state_id:
-                    # Found a state with the same id somewhere in the hierarchy
-                    # Return it so it can be promoted to the nearest common ancestor if needed
-                    return state, key
+                    # Check if this state is in an ancestor scope of the current path
+                    # (not a sibling composite state at the same level)
+                    # For example, if parent_path is "On_LoggedIn_Scan" and key is "On_LoggedIn_Print_Suspended",
+                    # this is NOT an ancestor (it's a sibling), so skip it.
+                    # But if key is "On_LoggedIn_Error", it IS in an ancestor scope.
+                    state_scope = key.rsplit('_', 1)[0] if '_' in key else ''
+                    # State is in ancestor scope if the current path starts with the state's scope
+                    # or if the state is at the same level as an ancestor
+                    if state_scope and parent_path.startswith(state_scope + '_'):
+                        # This state's scope is a prefix of our current path - it's an ancestor
+                        return state, key
+                    elif not state_scope:
+                        # Root level state
+                        return state, key
 
         # If we're at root level (parent_path is None), search all scopes for this state
         # This handles cases where a state is defined in a nested scope but referenced from root
@@ -353,29 +581,29 @@ class StateDiagramConverter:
                     # This state is being defined for the first time
                     if parent_id and from_id == parent_id:
                         # Self-reference: Don't set parent_id, use unscoped key
-                        new_state = self._create_state(state1_info, parent_id=None)
+                        new_state = self._create_state(state1_info, parent_id=None, scoped_id=from_id)
                         all_states[from_id] = new_state
                         from_state = new_state
                     elif "_start" in from_id or "_end" in from_id:
                         # Start/End states: use scoped key
                         scoped_key = self._get_scoped_key(from_id, parent_path)
-                        new_state = self._create_state(state1_info, parent_id)
+                        new_state = self._create_state(state1_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         from_state = new_state
                     elif parent_id:
                         # New state in this scope: use scoped key
                         scoped_key = self._get_scoped_key(from_id, parent_path)
-                        new_state = self._create_state(state1_info, parent_id)
+                        new_state = self._create_state(state1_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         from_state = new_state
                     else:
                         # Root level state: use unscoped key
-                        new_state = self._create_state(state1_info, parent_id=None)
+                        new_state = self._create_state(state1_info, parent_id=None, scoped_id=from_id)
                         all_states[from_id] = new_state
                         from_state = new_state
 
-                    if from_id in current_states:
-                        current_states[from_id] = from_state
+                    # Always add the new state to current_states
+                    current_states[from_id] = from_state
 
                 # Handle state2
                 to_id = state2_info["id"]
@@ -415,29 +643,29 @@ class StateDiagramConverter:
                     # This state is being defined for the first time
                     if parent_id and to_id == parent_id:
                         # Self-reference: Don't set parent_id, use unscoped key
-                        new_state = self._create_state(state2_info, parent_id=None)
+                        new_state = self._create_state(state2_info, parent_id=None, scoped_id=to_id)
                         all_states[to_id] = new_state
                         to_state = new_state
                     elif "_start" in to_id or "_end" in to_id:
                         # Start/End states: use scoped key
                         scoped_key = self._get_scoped_key(to_id, parent_path)
-                        new_state = self._create_state(state2_info, parent_id)
+                        new_state = self._create_state(state2_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         to_state = new_state
                     elif parent_id:
                         # New state in this scope: use scoped key
                         scoped_key = self._get_scoped_key(to_id, parent_path)
-                        new_state = self._create_state(state2_info, parent_id)
+                        new_state = self._create_state(state2_info, parent_id, scoped_id=scoped_key)
                         all_states[scoped_key] = new_state
                         to_state = new_state
                     else:
                         # Root level state: use unscoped key
-                        new_state = self._create_state(state2_info, parent_id=None)
+                        new_state = self._create_state(state2_info, parent_id=None, scoped_id=to_id)
                         all_states[to_id] = new_state
                         to_state = new_state
 
-                    if to_id in current_states:
-                        current_states[to_id] = to_state
+                    # Always add the new state to current_states
+                    current_states[to_id] = to_state
 
                 # Get transition label if present
                 label = item.get("description", "")
@@ -446,6 +674,74 @@ class StateDiagramConverter:
                 transitions.append(transition)
 
         return transitions
+
+    def _process_parallel_regions(
+        self,
+        divider_regions: list[dict],
+        all_states: dict[str, State],
+        parent_id: str = None,
+        parent_path: str = None,
+    ) -> list[dict]:
+        """
+        Process divider regions to extract parallel state information.
+
+        Each divider region contains states and transitions that should run
+        concurrently with other regions under the same parent.
+
+        Args:
+            divider_regions: List of divider items from the parser
+            all_states: Dictionary to store all states by id
+            parent_id: ID of the parent composite state
+            parent_path: Full hierarchical path to parent
+
+        Returns:
+            List of region dictionaries, each containing:
+            - 'name': Region identifier (e.g., 'region_0', 'region_1')
+            - 'states': Dict of states in this region
+            - 'transitions': List of transitions in this region
+            - 'initial': Initial state ID for this region (if any)
+        """
+        parallel_info = []
+
+        for idx, divider in enumerate(divider_regions):
+            divider_id = divider.get("id", f"region_{idx}")
+            divider_doc = divider.get("doc", [])
+
+            # Create a unique region name
+            region_name = f"region_{idx}"
+
+            # Process the divider's content using the existing conversion logic
+            # Use a modified parent path that includes the region identifier
+            region_parent_path = f"{parent_path}_{region_name}" if parent_path else region_name
+
+            region_states, region_notes, region_transitions = self._convert_states_and_notes(
+                divider_doc,
+                all_states,
+                parent_id=parent_id,  # States belong to the same parent
+                parent_path=region_parent_path
+            )
+
+            # Find the initial state for this region
+            initial_state = None
+            for state_id, state in region_states.items():
+                if isinstance(state, Start):
+                    # Find what the start state transitions to
+                    for trans in region_transitions:
+                        if isinstance(trans.from_state, Start):
+                            initial_state = trans.to_state.id_ if hasattr(trans.to_state, 'id_') else str(trans.to_state)
+                            break
+                    break
+
+            parallel_info.append({
+                'name': region_name,
+                'divider_id': divider_id,  # Original divider ID for reference
+                'states': region_states,
+                'transitions': region_transitions,
+                'notes': region_notes,
+                'initial': initial_state
+            })
+
+        return parallel_info
 
     def _convert_state_diagram(
         self, root_doc: list[dict], all_states: dict[str, State]
