@@ -54,6 +54,8 @@ class StateDiagramWithNote(StateDiagram):
         version: str = "v2",
         direction: Optional[Union[str, Direction]] = None,
         config: Optional[Config] = None,
+        root_initial_state: Optional[str] = None,
+        initial_states: Optional[dict] = None,
     ) -> None:
         """StateDiagramWithNote
 
@@ -65,8 +67,12 @@ class StateDiagramWithNote(StateDiagram):
             version (str, optional): Version of the stateDiagram. Defaults to 'v2'.
             direction (Optional[Union[str,Direction]], optional): Direction of the stateDiagram. Defaults to None.
             config (Optional[Config], optional): Configuration for the stateDiagram. Defaults to None.
+            root_initial_state (Optional[str], optional): The root-level initial state ID. Defaults to None.
+            initial_states (Optional[dict], optional): Map of composite state ID -> initial child state ID. Defaults to None.
         """  # noqa E501
         self.notes = notes
+        self.root_initial_state = root_initial_state
+        self.initial_states = initial_states if initial_states is not None else {}
         super().__init__(title, states, transitions, version, direction, config)
 
     def _build_script(self) -> None:

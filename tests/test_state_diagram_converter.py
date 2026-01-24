@@ -239,3 +239,42 @@ stateDiagram-v2
             assert (
                 getattr(b_state, "parent_id", None) is None
             ), "B should not have parent_id set"
+
+    def test_initial_state_extraction(self, converter):
+        """Test that root_initial_state and initial_states are correctly extracted"""
+        mermaid_text = """
+stateDiagram-v2
+    [*] --> Off
+    Off --> On : powerOn
+    On --> Off : powerOff
+
+    state On {
+        [*] --> LoggedOut
+        LoggedOut --> LoggedIn : tapCard
+
+        state LoggedIn {
+            [*] --> Idle
+            Idle --> Busy : start
+        }
+    }
+        """
+
+        result = converter.convert(mermaid_text)
+
+        # Test root initial state
+        assert (
+            result.root_initial_state == "Off"
+        ), f"Root initial state should be 'Off', got '{result.root_initial_state}'"
+
+        # Test nested initial states
+        assert "On" in result.initial_states, "On should have an initial state"
+        assert (
+            result.initial_states["On"] == "LoggedOut"
+        ), f"On's initial state should be 'LoggedOut', got '{result.initial_states.get('On')}'"
+
+        assert (
+            "LoggedIn" in result.initial_states
+        ), "LoggedIn should have an initial state"
+        assert (
+            result.initial_states["LoggedIn"] == "Idle"
+        ), f"LoggedIn's initial state should be 'Idle', got '{result.initial_states.get('LoggedIn')}'"
