@@ -36,6 +36,9 @@ class StateDiagramConverter:
         self.history_states = {}
         self.history_transitions = {}
 
+        # Fix missing closing -- separators in parallel regions
+        mermaid_text = self._fix_missing_parallel_region_closers(mermaid_text)
+
         # Pre-scan the raw mermaid text to find where each state is declared
         # This solves forward reference issues where states are used before being declared
         self.state_declarations_map = self._prescan_all_state_declarations_from_text(
@@ -90,6 +93,67 @@ class StateDiagramConverter:
         result.history_transitions = self.history_transitions
 
         return result
+
+    def _fix_missing_parallel_region_closers(self, mermaid_text: str) -> str:
+        """
+        Fix missing closing -- separators in parallel regions.
+
+        When a composite state has a -- separator but no closing --, insert one
+        before the closing brace to properly terminate parallel region mode.
+
+        Example:
+            Input:  state Active { state A {} -- state B {} }
+            Output: state Active { state A {} -- state B {} -- }
+
+        Args:
+            mermaid_text: The raw Mermaid state diagram text
+
+        Returns:
+            The fixed Mermaid text with properly closed parallel regions
+        """
+        lines = mermaid_text.split('\n')
+        fixed_lines = []
+        brace_stack = []  # Track nesting depth: (line_index, indent_level)
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+
+            # Track opening braces
+            if '{' in stripped:
+                indent = len(line) - len(line.lstrip())
+                brace_stack.append((i, indent))
+
+            # Track closing braces
+            if '}' in stripped:
+                if brace_stack:
+                    brace_stack.pop()
+
+                # Check if we need to insert a closing -- before this }
+                # Collect all content from the last { to this }
+                if len(brace_stack) > 0 or '{' not in ''.join(lines[max(0, i - 100):i]):
+                    # Find the matching opening brace
+                    open_brace_idx = None
+                    for j in range(i - 1, -1, -1):
+                        if '{' in lines[j]:
+                            open_brace_idx = j
+                            break
+
+                    if open_brace_idx is not None:
+                        # Get all content between opening and closing braces
+                        composite_content = '\n'.join(lines[open_brace_idx + 1:i])
+                        divider_count = composite_content.count('\n--')
+
+                        # If there's an odd number of -- (meaning we have opening but no closing)
+                        if divider_count > 0 and divider_count % 2 == 1:
+                            # Insert closing -- before the }
+                            # Preserve indentation
+                            indent = len(line) - len(line.lstrip())
+                            closing_divider = ' ' * indent + '--'
+                            fixed_lines.append(closing_divider)
+
+            fixed_lines.append(line)
+
+        return '\n'.join(fixed_lines)
 
     def _extract_initial_states(self, transitions: list) -> tuple:
         """
